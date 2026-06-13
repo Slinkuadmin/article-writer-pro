@@ -50,6 +50,111 @@ function assertConfigured(settings) {
   }
 }
 
+/** Remove trailing slashes so URL joins don't produce `//`. */
+function trimTrailingSlash(url) {
+  return (url || '').replace(/\/+$/, '');
+}
+
+/**
+ * Heuristic: reasoning-style models (OpenAI o-series, gpt-5, gpt-oss, DeepSeek-R,
+ * etc.) use `max_completion_tokens` instead of `max_tokens` and often reject a
+ * custom `temperature`. We start with those assumptions for matching models but
+ * still adapt automatically based on the provider's error response.
+ */
+function isReasoningModel(model) {
+  return /(^|[^a-z])(o1|o3|o4|gpt-5|gpt-oss|reason|deepseek-r)/i.test(model || '');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Perform an OpenAI-compatible chat completion that works across providers.
+ *
+ * Different OpenAI-compatible APIs disagree on parameter names: classic chat
+ * models use `max_tokens` + `temperature`, while newer reasoning models (e.g.
+ * BytePlus Ark `gpt-oss-*`, OpenAI o-series) require `max_completion_tokens` and
+ * reject a custom temperature. This sends the most likely variant first and
+ * automatically retries with the alternate when the provider complains. It also
+ * retries transient 5xx errors (some providers return a flaky 500 with
+ * "please retry later").
+ */
+async function chatCompletion(settings, messages, { maxTokens, temperature } = {}) {
+  const url = `${trimTrailingSlash(settings.apiBaseUrl)}/chat/completions`;
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${settings.apiKey}`,
+  };
+
+  const reasoning = isReasoningModel(settings.model);
+  let tokenParam = reasoning ? 'max_completion_tokens' : 'max_tokens';
+  let includeTemperature = !reasoning;
+
+  let adaptations = 0;
+  let serverRetries = 0;
+
+  // Cap total attempts so a misbehaving provider can never loop forever.
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const body = { model: settings.model, messages };
+    if (typeof maxTokens === 'number' && maxTokens > 0) {
+      body[tokenParam] = maxTokens;
+    }
+    if (includeTemperature && typeof temperature === 'number') {
+      body.temperature = temperature;
+    }
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+    } catch (networkErr) {
+      throw new Error(`Network error contacting AI provider: ${networkErr.message}`);
+    }
+
+    if (response.ok) {
+      return response.json();
+    }
+
+    const errorText = await response.text();
+    const lower = errorText.toLowerCase();
+
+    // Adapt to parameter incompatibilities (usually HTTP 400) and retry once each.
+    if (response.status === 400 && adaptations < 3) {
+      let adapted = false;
+      if (tokenParam === 'max_tokens' && lower.includes('max_completion_tokens')) {
+        tokenParam = 'max_completion_tokens';
+        adapted = true;
+      } else if (tokenParam === 'max_completion_tokens' && lower.includes('max_tokens')) {
+        tokenParam = 'max_tokens';
+        adapted = true;
+      }
+      if (includeTemperature && lower.includes('temperature')) {
+        includeTemperature = false;
+        adapted = true;
+      }
+      if (adapted) {
+        adaptations += 1;
+        continue;
+      }
+    }
+
+    // Transient server-side errors: brief backoff then retry.
+    if (response.status >= 500 && serverRetries < 2) {
+      serverRetries += 1;
+      await sleep(600 * serverRetries);
+      continue;
+    }
+
+    throw new Error(`API Error ${response.status}: ${errorText}`);
+  }
+
+  throw new Error('AI provider request failed after multiple attempts. Please try again.');
+}
+
 function buildPrompt(template, keyword, language, tone, length) {
   const lengthMap = { short: '500', medium: '1000', long: '2000' };
   const wordCount = lengthMap[length] || '1000';
@@ -132,36 +237,21 @@ async function generateArticle(keyword, promptTemplate, language, tone, length, 
 
   const prompt = buildPrompt(promptTemplate, keyword, language, tone, length);
 
-  const response = await fetch(`${settings.apiBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${settings.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a professional SEO content writer. You write comprehensive, engaging, and well-structured articles optimized for search engines.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      max_tokens: settings.maxTokens,
-      temperature: settings.temperature,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`API Error ${response.status}: ${errorText}`);
-  }
-
-  const data = await response.json();
+  const data = await chatCompletion(
+    settings,
+    [
+      {
+        role: 'system',
+        content:
+          'You are a professional SEO content writer. You write comprehensive, engaging, and well-structured articles optimized for search engines.',
+      },
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ],
+    { maxTokens: settings.maxTokens, temperature: settings.temperature },
+  );
 
   if (!data.choices || !data.choices[0]) {
     throw new Error('Invalid API response: no choices returned');
@@ -174,26 +264,17 @@ async function generateArticle(keyword, promptTemplate, language, tone, length, 
 async function testConnection(config = {}) {
   const settings = { ...DEFAULT_CONFIG, ...config };
   assertConfigured(settings);
-  const response = await fetch(`${settings.apiBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${settings.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      messages: [{ role: 'user', content: 'Hello, respond with "Connection successful!"' }],
-      max_tokens: 50,
-      temperature: 0,
-    }),
-  });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`API Error ${response.status}: ${errorText}`);
+  const data = await chatCompletion(
+    settings,
+    [{ role: 'user', content: 'Hello, respond with "Connection successful!"' }],
+    { maxTokens: 50, temperature: 0 },
+  );
+
+  if (!data.choices || !data.choices[0]) {
+    throw new Error('Invalid API response: no choices returned');
   }
 
-  const data = await response.json();
   return data.choices[0].message.content;
 }
 
