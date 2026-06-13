@@ -29,14 +29,26 @@ function makeExcerpt(plainText, maxLen = 160) {
 }
 
 // ── AI config ──
+// SECURITY: No real credentials are hardcoded. The API base URL, model and API
+// key are provided by the admin via the First-Run Setup Wizard / Settings and
+// loaded from the (encrypted) settings store at runtime.
 
 const DEFAULT_CONFIG = {
-  apiBaseUrl: 'https://ark.ap-southeast.bytepluses.com/api/v3',
-  apiKey: 'd88c479d-a74d-4040-91df-207bcd94b4a4',
-  model: 'glm-4-7-251222',
+  apiBaseUrl: '',
+  apiKey: '',
+  model: '',
   maxTokens: 4096,
   temperature: 0.7,
 };
+
+/** Throw a clear error when the AI provider has not been configured yet. */
+function assertConfigured(settings) {
+  if (!settings.apiBaseUrl || !settings.apiKey || !settings.model) {
+    throw new Error(
+      'AI provider is not configured. Add the base URL, model and API key in Settings.',
+    );
+  }
+}
 
 function buildPrompt(template, keyword, language, tone, length) {
   const lengthMap = { short: '500', medium: '1000', long: '2000' };
@@ -116,6 +128,7 @@ function parseAIResponse(text, originalKeyword) {
 
 async function generateArticle(keyword, promptTemplate, language, tone, length, config = {}) {
   const settings = { ...DEFAULT_CONFIG, ...config };
+  assertConfigured(settings);
 
   const prompt = buildPrompt(promptTemplate, keyword, language, tone, length);
 
@@ -160,6 +173,7 @@ async function generateArticle(keyword, promptTemplate, language, tone, length, 
 
 async function testConnection(config = {}) {
   const settings = { ...DEFAULT_CONFIG, ...config };
+  assertConfigured(settings);
   const response = await fetch(`${settings.apiBaseUrl}/chat/completions`, {
     method: 'POST',
     headers: {

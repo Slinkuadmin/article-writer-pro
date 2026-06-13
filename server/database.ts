@@ -1,31 +1,26 @@
 import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import fs from 'fs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { DB_PATH, ensureDataDir } from './lib/paths.js';
 
-const dbDir = path.join(__dirname, '..', 'database');
-if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+ensureDataDir();
 
-const dbPath = path.join(dbDir, 'articlewriter.db');
-const db = new Database(dbPath);
+const db = new Database(DB_PATH);
 
-// Enable WAL mode for better performance
+// Enable WAL mode for better performance.
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 // ── Migration helper: add column if it doesn't exist ──
-function addColumnIfMissing(table, column, definition) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+function addColumnIfMissing(table: string, column: string, definition: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (!cols.find((c) => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    // eslint-disable-next-line no-console
     console.log(`Migration: added ${table}.${column}`);
   }
 }
 
-function initialize() {
+function initialize(): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +41,7 @@ function initialize() {
       tags TEXT DEFAULT '[]',
       status TEXT DEFAULT 'pending' CHECK(status IN ('pending','generating','completed','failed')),
       error_message TEXT DEFAULT '',
-      language TEXT DEFAULT 'Indonesian',
+      language TEXT DEFAULT 'English',
       tone TEXT DEFAULT 'informational',
       word_count INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -106,14 +101,14 @@ function initialize() {
   addColumnIfMissing('articles', 'excerpt', "TEXT DEFAULT ''");
   addColumnIfMissing('articles', 'tags', "TEXT DEFAULT '[]'");
 
-  // Seed default settings
-  const defaultSettings = [
-    { key: 'api_base_url', value: 'https://ark.ap-southeast.bytepluses.com/api/v3' },
-    { key: 'api_key', value: 'd88c479d-a74d-4040-91df-207bcd94b4a4' },
-    { key: 'model', value: 'glm-4-7-251222' },
+  // ── Seed NON-SECRET default settings only ──
+  // SECURITY: AI provider URL, model and API key are intentionally NOT seeded
+  // here. They are configured by the admin via the First-Run Setup Wizard and
+  // stored (encrypted) in the settings table. Never hardcode real credentials.
+  const defaultSettings: Array<{ key: string; value: string }> = [
     { key: 'max_tokens', value: '4096' },
     { key: 'temperature', value: '0.7' },
-    { key: 'default_language', value: 'Indonesian' },
+    { key: 'default_language', value: 'English' },
     { key: 'default_tone', value: 'informational' },
     { key: 'rate_limit_ms', value: '2000' },
   ];
@@ -123,8 +118,10 @@ function initialize() {
     insertSetting.run(s.key, s.value);
   }
 
-  // Seed default prompt
-  const promptCount = db.prepare('SELECT COUNT(*) as count FROM prompts').get();
+  // Seed default prompt (non-secret).
+  const promptCount = db.prepare('SELECT COUNT(*) as count FROM prompts').get() as {
+    count: number;
+  };
   if (promptCount.count === 0) {
     db.prepare(`INSERT INTO prompts (name, template, is_default) VALUES (?, ?, 1)`).run(
       'Default SEO Article',
@@ -146,12 +143,14 @@ Format your response EXACTLY as:
 TITLE: [Your engaging article title here]
 KEYWORD: {keyword}
 CONTENT:
-[Full article content in HTML format with <h2>, <h3>, <p>, <ul>, <li> tags]`
+[Full article content in HTML format with <h2>, <h3>, <p>, <ul>, <li> tags]`,
     );
   }
 
-  // Seed default HTML template
-  const templateCount = db.prepare('SELECT COUNT(*) as count FROM html_templates').get();
+  // Seed default HTML template (non-secret).
+  const templateCount = db.prepare('SELECT COUNT(*) as count FROM html_templates').get() as {
+    count: number;
+  };
   if (templateCount.count === 0) {
     db.prepare(`INSERT INTO html_templates (name, content, is_default) VALUES (?, ?, 1)`).run(
       'Clean Blog',
@@ -186,11 +185,12 @@ CONTENT:
     </div>
   </article>
 </body>
-</html>`
+</html>`,
     );
   }
 
-  console.log('Database initialized at:', dbPath);
+  // eslint-disable-next-line no-console
+  console.log('Database initialized at:', DB_PATH);
 }
 
 initialize();

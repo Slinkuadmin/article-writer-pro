@@ -27,13 +27,14 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Copy built frontend and server code from build stage
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server ./server
+COPY --from=build /app/tsconfig.json ./tsconfig.json
 
 # Copy and prepare entrypoint
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Create writable database directory
-RUN mkdir -p /app/database && chown -R appuser:appgroup /app
+# Create writable persistent data directory (database + app-secret live here)
+RUN mkdir -p /app/data && chown -R appuser:appgroup /app
 
 ENV NODE_ENV=production
 ENV PORT=3001

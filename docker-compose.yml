@@ -1,10 +1,13 @@
 services:
   articlewriterpro:
     image: mpratamamail/article-writer-pro:latest
+    # To build locally instead of pulling, comment out `image:` above and use:
+    # build: .
     ports:
       - "3001:3001"
     volumes:
-      - ./database:/app/database
+      # Persist database + app-secret across redeploys.
+      - ./data:/app/data
     environment:
       - NODE_ENV=production
       - PORT=3001

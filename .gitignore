@@ -1,7 +1,13 @@
 node_modules/
 dist/
+dist-server/
+
+# Persistent runtime data (database, app-secret) — never commit
+data/
 database/*.db
-.env
-*.log
 database/*.db-shm
 database/*.db-wal
+
+# Secrets / env
+.env
+*.log
