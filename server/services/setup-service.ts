@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { config } from '../config/index.js';
+import { DATA_DIR, ensureDataDir } from '../lib/paths.js';
 import { audit } from './audit-service.js';
 import { createAdminUser, hasAdminUser } from './auth-service.js';
 import { setApiKeyEncrypted, setSetting } from './settings-service.js';
@@ -13,9 +16,60 @@ import type { SetupInput } from '../schemas/index.js';
  * is generated and printed to the server logs; the setup form must present this
  * token to complete setup. Once an admin exists, setup mode is disabled and the
  * token is invalidated.
+ *
+ * The token is persisted to the data volume (`DATA_DIR/setup-token`) so it stays
+ * valid across container restarts/redeploys — on platforms like Railway the
+ * container can restart frequently, and an in-memory-only token would be
+ * invalidated on every restart, breaking the setup link printed in the logs.
  */
 
+const SETUP_TOKEN_PATH = path.join(DATA_DIR, 'setup-token');
+
 let setupToken: string | null = null;
+
+/** Read the persisted setup token from disk, if any. */
+function readPersistedToken(): string | null {
+  try {
+    const value = fs.readFileSync(SETUP_TOKEN_PATH, 'utf8').trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the setup token to disk so it survives restarts. */
+function writePersistedToken(token: string): void {
+  try {
+    ensureDataDir();
+    fs.writeFileSync(SETUP_TOKEN_PATH, token, { mode: 0o600 });
+  } catch {
+    // Non-fatal: fall back to the in-memory token for this process lifetime.
+  }
+}
+
+/** Remove the persisted setup token file. */
+function removePersistedToken(): void {
+  try {
+    fs.rmSync(SETUP_TOKEN_PATH, { force: true });
+  } catch {
+    // Ignore.
+  }
+}
+
+/**
+ * Resolve the public base URL used in the printed setup link. Prefers an
+ * explicitly configured public URL, then the Railway-provided public domain,
+ * then falls back to localhost for local development.
+ */
+function resolvePublicBaseUrl(): string {
+  const explicit = process.env.PUBLIC_URL || process.env.APP_URL;
+  if (explicit) return explicit.replace(/\/+$/, '');
+
+  const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
+  if (railwayDomain) return `https://${railwayDomain}`;
+
+  return `http://localhost:${config.port}`;
+}
 
 /** True when no admin user exists yet. */
 export function isSetupRequired(): boolean {
@@ -29,12 +83,15 @@ export function isSetupRequired(): boolean {
 export function ensureSetupToken(): void {
   if (!isSetupRequired()) {
     setupToken = null;
+    removePersistedToken();
     return;
   }
   if (!setupToken) {
-    setupToken = crypto.randomBytes(24).toString('hex');
+    // Reuse a previously persisted token so the link survives restarts.
+    setupToken = readPersistedToken() ?? crypto.randomBytes(24).toString('hex');
+    writePersistedToken(setupToken);
   }
-  const base = `http://localhost:${config.port}`;
+  const base = resolvePublicBaseUrl();
   // eslint-disable-next-line no-console
   console.log(
     [
@@ -44,7 +101,7 @@ export function ensureSetupToken(): void {
       ' Open the setup wizard in your browser:',
       `   ${base}/setup?token=${setupToken}`,
       '',
-      ' (Behind a proxy/Railway, use your public URL + the same path.)',
+      ' (Set PUBLIC_URL or rely on RAILWAY_PUBLIC_DOMAIN for the public link.)',
       '────────────────────────────────────────────────────────',
       '',
     ].join('\n'),
@@ -62,6 +119,7 @@ export function isValidSetupToken(token: string | undefined): boolean {
 /** Invalidate the token (after successful setup). */
 export function clearSetupToken(): void {
   setupToken = null;
+  removePersistedToken();
 }
 
 /**
