@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -77,9 +78,31 @@ app.use('/api', notFoundHandler);
 // ── Serve the built SPA in production ──
 if (config.isProduction) {
   const distPath = path.join(__dirname, '..', 'dist');
-  app.use(express.static(distPath));
-  app.get('*', (_req, res) => {
-    res.sendFile(path.join(distPath, 'index.html'));
+  const indexHtml = path.join(distPath, 'index.html');
+
+  if (!fs.existsSync(indexHtml)) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[startup] Built frontend not found at ${distPath}. ` +
+        'Run "npm run build" (the Dockerfile build stage does this automatically).',
+    );
+  }
+
+  // Serve hashed static assets with correct MIME types and long-lived caching.
+  app.use(express.static(distPath, { index: false, maxAge: '1y' }));
+
+  // SPA fallback. Only serve index.html for navigation-style requests. A request
+  // for a missing file (it has an extension, e.g. a stale /assets/*.css|js hash)
+  // must return a real 404 — never index.html — so the browser does not receive
+  // HTML where it expects a stylesheet/script (the "wrong MIME type" error).
+  app.get('*', (req, res, next) => {
+    if (path.extname(req.path)) {
+      res.status(404).end();
+      return;
+    }
+    res.sendFile(indexHtml, (err) => {
+      if (err) next(err);
+    });
   });
 }
 
